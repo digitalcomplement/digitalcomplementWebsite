@@ -1,97 +1,190 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { StrategyItem, EmailResult, SocialResult } from "../types";
 
-let aiClient: GoogleGenAI | null = null;
+/**
+ * PRODUCTION SECURITY NOTE:
+ * In a pure client-side application (like this React app), the API Key is visible in the browser network traffic.
+ * To safeguard your key in production:
+ * 1. Go to Google Cloud Console > APIs & Services > Credentials.
+ * 2. Edit your API Key.
+ * 3. Under "Application restrictions", select "Websites".
+ * 4. Add your production domain (e.g., https://digitalcomplement.com/*).
+ * 
+ * This prevents others from stealing your key and using it on their own sites.
+ */
 
-const getAiClient = () => {
-  if (!aiClient) {
-    // Ideally this comes from process.env.API_KEY as per instructions
-    const apiKey = process.env.API_KEY || ''; 
-    if (apiKey) {
-      aiClient = new GoogleGenAI({ apiKey });
-    } else {
-      console.warn("API Key is missing. AI features will be simulated or fail.");
+// --- CONFIGURATION ---
+const MAX_INPUT_LENGTH = 500; // Prevent token exhaustion attacks
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 Minute
+const MAX_REQUESTS_PER_WINDOW = 10; // Allow 10 requests per minute per user
+
+// --- RATE LIMITER ---
+class RateLimiter {
+  private requestCount = 0;
+  private windowStart = Date.now();
+
+  check(): boolean {
+    const now = Date.now();
+    if (now - this.windowStart > RATE_LIMIT_WINDOW_MS) {
+      this.requestCount = 0;
+      this.windowStart = now;
     }
+    if (this.requestCount >= MAX_REQUESTS_PER_WINDOW) {
+      console.warn("Rate limit exceeded. Switching to simulation mode.");
+      return false; 
+    }
+    this.requestCount++;
+    return true;
+  }
+}
+
+const rateLimiter = new RateLimiter();
+let aiClient: GoogleGenAI | null = null;
+let isMockMode = false;
+
+// --- INITIALIZATION ---
+const getAiClient = () => {
+  if (aiClient) return aiClient;
+
+  let apiKey = '';
+
+  // 1. Try Vite Standard (import.meta.env) - Safe for browser
+  // @ts-ignore
+  if (typeof import.meta !== 'undefined' && import.meta.env) {
+    // @ts-ignore
+    apiKey = import.meta.env.VITE_API_KEY || '';
+  }
+
+  // 2. Fallback to process.env (Safe check to avoid crashing if process is undefined)
+  if (!apiKey && typeof process !== 'undefined' && process.env) {
+    apiKey = process.env.REACT_APP_API_KEY || 
+             process.env.VITE_API_KEY || 
+             process.env.API_KEY || 
+             '';
+  }
+
+  if (apiKey && !apiKey.startsWith('YOUR_')) {
+    try {
+      aiClient = new GoogleGenAI({ apiKey });
+      isMockMode = false;
+    } catch (e) {
+      console.error("Failed to initialize Gemini Client:", e);
+      isMockMode = true;
+    }
+  } else {
+    console.warn("API Key missing or invalid. App running in SIMULATION MODE.");
+    isMockMode = true;
   }
   return aiClient;
 };
+
+// --- HELPER: INPUT SANITIZATION ---
+const sanitizeInput = (input: string): string => {
+  return input.trim().slice(0, MAX_INPUT_LENGTH);
+};
+
+// --- MOCK DATA GENERATORS (Fallback for Production Stability) ---
+const getMockStrategy = (business: string): StrategyItem[] => [
+  {
+    title: "AI Customer Onboarding",
+    description: `Deploy a custom agent to welcome new ${business || 'clients'} and collect requirements automatically.`,
+    impact: "Save 12+ hrs/week",
+    tools: ["Voiceflow", "OpenAI"]
+  },
+  {
+    title: "Automated Lead Nurturing",
+    description: "Connect your CRM to email marketing to follow up with leads instantly based on behavior.",
+    impact: "Increase conversions by 35%",
+    tools: ["HubSpot", "Make.com"]
+  },
+  {
+    title: "Predictive Inventory",
+    description: "Use historical data to predict stock needs and automate reordering before you run out.",
+    impact: "Reduce overhead by 20%",
+    tools: ["Custom Python Script", "Pandas"]
+  }
+];
+
+const getMockEmail = (recipient: string, topic: string): EmailResult => ({
+  subject: `Opportunity to streamline operations for ${recipient}`,
+  body: `Hi ${recipient},\n\nI hope you're having a great week.\n\nI was looking at your work regarding ${topic} and noticed some huge opportunities for automation.\n\nAt Digital Complement, we help businesses reclaim their time using AI. I'd love to share a few ideas tailored to your needs.\n\nAre you open to a 10-minute chat this Thursday?\n\nBest regards,\nThe Digital Complement Team`
+});
+
+const getMockSocial = (platform: string, topic: string): SocialResult => ({
+  hook: "Stop working harder, start working smarter. 💡",
+  content: `We just helped another client automate their ${topic} workflow and the results are incredible. \n\n✅ 0 Manual Errors\n✅ 50% Faster Turnaround\n✅ Happy Team\n\nIs your business ready for the next level?`,
+  hashtags: [`#${platform.replace(/\s/g, '')}`, "#Automation", "#GrowthHacking", "#AI"]
+});
+
+// --- API FUNCTIONS ---
 
 export const generateConsultantResponse = async (
   history: { role: string; parts: { text: string }[] }[],
   userMessage: string
 ): Promise<string> => {
-  const client = getAiClient();
+  const cleanInput = sanitizeInput(userMessage);
   
-  if (!client) {
-    return "I'm currently offline (API Key missing). Please contact our team directly via the form below!";
+  // Safe execution wrapper to prevent app crash
+  let client;
+  try {
+     client = getAiClient();
+  } catch (e) {
+     console.error("Client Init Error", e);
+     return "I'm operating in offline mode right now. Please contact us via email!";
+  }
+
+  const canProceed = rateLimiter.check();
+
+  if (!client || !canProceed || isMockMode) {
+    // Simulated intelligent responses based on keywords
+    const lower = cleanInput.toLowerCase();
+    if (lower.includes('price') || lower.includes('cost')) return "Our pricing is tailored to your specific needs. Typically, small automation projects start around $1,500, while full AI agents vary. Shall we book a call to get you a quote?";
+    if (lower.includes('real estate')) return "For Real Estate, we specialize in 24/7 lead qualification bots and automated follow-up sequences. It ensures you never miss a viewing request!";
+    if (lower.includes('contact') || lower.includes('email')) return "You can reach us at hello@digitalcomplement.com or use the form at the bottom of the page!";
+    return "That's a great question! Digital Complement specializes in AI Agents, Web Dev, and Automation. Could you tell me a bit more about your specific business needs so I can advise better?";
   }
 
   try {
     const model = 'gemini-2.5-flash';
-    const systemInstruction = `You are 'Nexus', the advanced AI consultant for Digital Complement. 
-    Digital Complement is a software agency specializing in:
-    1. AI Tools & Custom AI Agents (Chatbots, Data Analyzers).
-    2. Business Automation (Workflow streamlining, Zapier/Make integrations).
-    3. Website Creation & Maintenance (React, Modern UI/UX).
-    4. Social Media Support (Content strategy, automated posting).
-    
-    Target Audience: Real Estate Agencies and Small Businesses.
-    
-    Your goal is to be helpful, professional, and demonstrate technical competence. 
-    Keep answers concise (under 100 words) unless asked for details.
-    Encourage the user to book a consultation or fill out the contact form for specific quotes.
-    If asked about pricing, say it depends on the project scope but we offer competitive packages for small businesses.`;
+    const systemInstruction = `You are 'Nexus', the AI consultant for Digital Complement. 
+    Expertise: AI Agents, Automation (Zapier/Make), Web Dev, Social Media.
+    Audience: Real Estate & Small Business.
+    Tone: Professional, Innovative, Helpful.
+    Goal: Briefly explain benefits and guide them to the 'Contact' form.
+    Constraint: Keep response under 80 words.`;
 
     const chat = client.chats.create({
       model: model,
-      config: {
-        systemInstruction: systemInstruction,
-        temperature: 0.7,
-      },
+      config: { systemInstruction, temperature: 0.7 },
       history: history,
     });
 
-    const result = await chat.sendMessage({ message: userMessage });
-    return result.text || "I apologize, I processed that but couldn't generate a text response.";
+    const result = await chat.sendMessage({ message: cleanInput });
+    return result.text || "I processed that, but couldn't generate a response. Please try asking differently.";
   } catch (error) {
-    console.error("Gemini API Error:", error);
-    return "I'm having trouble connecting to my knowledge base right now. Please try again later or use the contact form.";
+    console.error("Gemini API Error (Chat):", error);
+    return "I'm having trouble connecting to the neural network. Please try again in a moment.";
   }
 };
 
 export const generateBusinessStrategy = async (businessDescription: string): Promise<StrategyItem[]> => {
-  const client = getAiClient();
+  const cleanInput = sanitizeInput(businessDescription);
   
-  if (!client) {
-    // Fallback mock data
-    return [
-      {
-        title: "Intelligent Lead Capture",
-        description: "Deploy an AI chatbot to engage website visitors 24/7, qualifying leads instantly.",
-        impact: "Increase lead conversion by 40%",
-        tools: ["Custom AI Agent", "CRM Integration"]
-      },
-      {
-        title: "Automated Follow-ups",
-        description: "Set up automated email and SMS sequences triggered by specific user actions.",
-        impact: "Save 10+ hours/week",
-        tools: ["Make.com", "Email Marketing"]
-      },
-      {
-        title: "Content Generation Engine",
-        description: "Generate social media posts and blog articles tailored to your audience automatically.",
-        impact: "3x Social Engagement",
-        tools: ["GenAI Content API", "Social Scheduler"]
-      }
-    ];
+  let client;
+  try { client = getAiClient(); } catch (e) { client = null; }
+  
+  const canProceed = rateLimiter.check();
+
+  if (!client || !canProceed || isMockMode) {
+    await new Promise(r => setTimeout(r, 1500)); // Fake loading delay for realism
+    return getMockStrategy(cleanInput);
   }
 
   try {
     const response = await client.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: `Analyze the following business type: "${businessDescription}". 
-      Suggest 3 specific, high-impact AI or Automation strategies that Digital Complement could build for them.
-      Focus on efficiency, cost-saving, or revenue generation.`,
+      contents: `Analyze: "${cleanInput}". Suggest 3 high-impact AI/Automation strategies.
+      Return JSON array with title, description (1 sentence), impact (quantifiable), tools (array of strings).`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -99,14 +192,10 @@ export const generateBusinessStrategy = async (businessDescription: string): Pro
           items: {
             type: Type.OBJECT,
             properties: {
-              title: { type: Type.STRING, description: "A catchy title for the strategy." },
-              description: { type: Type.STRING, description: "A brief 1-sentence explanation." },
-              impact: { type: Type.STRING, description: "Estimated quantifiable impact." },
-              tools: { 
-                type: Type.ARRAY, 
-                items: { type: Type.STRING },
-                description: "List of 1-2 technologies used."
-              }
+              title: { type: Type.STRING },
+              description: { type: Type.STRING },
+              impact: { type: Type.STRING },
+              tools: { type: Type.ARRAY, items: { type: Type.STRING } }
             },
             required: ["title", "description", "impact", "tools"]
           }
@@ -114,89 +203,87 @@ export const generateBusinessStrategy = async (businessDescription: string): Pro
       }
     });
 
-    const text = response.text;
-    if (!text) throw new Error("No response generated");
-    return JSON.parse(text) as StrategyItem[];
+    return JSON.parse(response.text || '[]') as StrategyItem[];
   } catch (error) {
-    console.error("Strategy Generation Error:", error);
-    throw error;
+    console.error("Strategy API Error:", error);
+    return getMockStrategy(cleanInput); // Graceful fallback
   }
 };
 
 export const generateEmailDraft = async (recipient: string, topic: string): Promise<EmailResult> => {
-  const client = getAiClient();
+  const cleanRecipient = sanitizeInput(recipient);
+  const cleanTopic = sanitizeInput(topic);
   
-  if (!client) {
-    return {
-      subject: "Unlock Your Business Potential with AI",
-      body: `Hi ${recipient},\n\nI noticed you're looking into ${topic} and I wanted to reach out.\n\nAt Digital Complement, we specialize in helping businesses like yours automate workflows and increase efficiency. I'd love to show you how our latest AI tools can help you achieve your goals.\n\nAre you free for a quick call this week?\n\nBest,\nDigital Complement Team`
-    };
+  let client;
+  try { client = getAiClient(); } catch (e) { client = null; }
+  
+  const canProceed = rateLimiter.check();
+
+  if (!client || !canProceed || isMockMode) {
+    await new Promise(r => setTimeout(r, 1500));
+    return getMockEmail(cleanRecipient, cleanTopic);
   }
 
   try {
     const response = await client.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: `Write a professional cold email to "${recipient}" regarding "${topic}".
-      The tone should be professional, persuasive, and concise.
-      Return a JSON object with 'subject' and 'body' fields.`,
+      contents: `Write a professional cold email to "${cleanRecipient}" about "${cleanTopic}".
+      Return JSON with subject and body. Keep it persuasive.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            subject: { type: Type.STRING, description: "A compelling email subject line." },
-            body: { type: Type.STRING, description: "The email body text. Use \\n for line breaks." }
+            subject: { type: Type.STRING },
+            body: { type: Type.STRING }
           },
           required: ["subject", "body"]
         }
       }
     });
 
-    const text = response.text;
-    if (!text) throw new Error("No response generated");
-    return JSON.parse(text) as EmailResult;
+    return JSON.parse(response.text || '{}') as EmailResult;
   } catch (error) {
-    console.error("Email Generation Error:", error);
-    throw error;
+    console.error("Email API Error:", error);
+    return getMockEmail(cleanRecipient, cleanTopic);
   }
 };
 
 export const generateSocialPost = async (platform: string, topic: string): Promise<SocialResult> => {
-  const client = getAiClient();
+  const cleanTopic = sanitizeInput(topic);
   
-  if (!client) {
-    return {
-      hook: "Ready to revolutionize your workflow? 🚀",
-      content: `AI isn't just the future—it's here now. By automating ${topic}, businesses are saving hours every week. Don't get left behind!`,
-      hashtags: ["#AI", "#Automation", "#DigitalTransformation", "#TechTrends"]
-    };
+  let client;
+  try { client = getAiClient(); } catch (e) { client = null; }
+  
+  const canProceed = rateLimiter.check();
+
+  if (!client || !canProceed || isMockMode) {
+    await new Promise(r => setTimeout(r, 1500));
+    return getMockSocial(platform, cleanTopic);
   }
 
   try {
     const response = await client.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: `Write a viral social media post for ${platform} about "${topic}".
-      Include a catchy hook, the main content, and relevant hashtags.
-      Return JSON.`,
+      contents: `Write a viral ${platform} post about "${cleanTopic}".
+      Return JSON with hook, content, hashtags (array).`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            hook: { type: Type.STRING, description: "A short, attention-grabbing opening line." },
-            content: { type: Type.STRING, description: "The main post content. Include emojis where appropriate." },
-            hashtags: { type: Type.ARRAY, items: { type: Type.STRING }, description: "List of 5 relevant hashtags." }
+            hook: { type: Type.STRING },
+            content: { type: Type.STRING },
+            hashtags: { type: Type.ARRAY, items: { type: Type.STRING } }
           },
           required: ["hook", "content", "hashtags"]
         }
       }
     });
 
-    const text = response.text;
-    if (!text) throw new Error("No response generated");
-    return JSON.parse(text) as SocialResult;
+    return JSON.parse(response.text || '{}') as SocialResult;
   } catch (error) {
-    console.error("Social Generation Error:", error);
-    throw error;
+    console.error("Social API Error:", error);
+    return getMockSocial(platform, cleanTopic);
   }
 };
